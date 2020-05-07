@@ -8,7 +8,9 @@ function [] = StrainAnalysis(tn,sn)
 % dataset name passed into it
 %
 %
-% INPUTS: tn (trial name, written exactly as the name of the corresponding file), sn (subject number, should be formatted 'Sxx_', where 'S01_' corresponds to subject 1)
+% INPUTS: tn (trial name, written exactly as the name of the corresponding file),
+% sn (subject number, should be formatted 'Sxx', where 'S01' corresponds to subject 1),
+% a MATLAB data file (ext .mat) with the same name as tn
 % 
 % 
 % OUTPUTS: generates an external .avi file that animates the strain
@@ -19,9 +21,13 @@ function [] = StrainAnalysis(tn,sn)
 %
 %
 % VERSION HISTORY
-% V1 - Original
+% V1 - Original. Transformed 3d marker coordinates into a 2d space before
+% perfroming strain calculations
+% V2 - Altered to only convert the triangle being processed into 2d to
+% prevent information loss of batch transforming before strain calculations
 % ----------------------------- End Header ----------------------------- %
 
+%% Data Organization %%
 name={strcat(tn,'.mat'),tn};
 input=load(name{1},name{2});
 
@@ -50,10 +56,10 @@ if length(input.(name{2}).Trajectories.Labeled.Labels)~=36
     save(DataFile,'Fs','ns','P');
     return
 end
-% create matrix to hold every marker's location
+% Create matrix to hold every marker's location organized according to above layout
 nc=nm*3; % gives the number of columns in BIG (the total number of markers x3)
 BIG=nan(nc,ns); % initialize the matrix to hold all of the markers, ordered.
-%% Name the markers
+% Name the markers
 %           1        2        3      4     5     6      7       8        9       10     11     12     13    14     15     16     17     18    19    20    21    22    23    24    25    26    27    28    29    30     31     32     33     34     35     36
 markers={'PSISL3','PSISL2','PSISL','S2L','S2C','S2R','PSISR','PSISR2','PSISR3','L5L4','L5L3','L5L2','L5L1','L5C','L5R1','L5R2','L5R3','L5R4','L4L','L4C','L4R','L3L','L3C','L3R','L2L','L2C','L2R','L1L','L1C','L1R','T12L','T12C','T12R','T11L','T11C','T11R'};
 % Populate the ordered matrix of marker xyz values, using the names of each marker to index througth the names of the markers 
@@ -63,20 +69,16 @@ for i=1:nm
 end
 BIG=BIG'; % The data comes in with the samples/frames on the horizontal axis, this adjusts to have the markers specified by column, the sample specified by row
 clear input;
-
-% % Generate parameters for 3rd order low-pass Butterworth filter
-% [b,a]=butter(3,6/(Fs/2));
-% % Filter BIG to clean the data a bit
-% for i=1:nm*3
-%     BIG(:,i)=filter(b,a,BIG(:,i));
-% end
-
-% Generate matrix for 2D coordinates
-D2=zeros(ns,2,36); % (sample, xy, marker)
+%% Strain Calculation
 
 refp=1; % set reference frame/sample for the strain calculations
+ds0=[nan;nan;nan]; % [segment1, segment2, segment3] initial delta-s^2 of each segment of current triangle
+ds=[nan;nan;nan]; % [segment1, segment2, segment3] current delta-s^2 of each segment of current triangle
+dds=[nan;nan;nan]; % [segment1, segment2, segment3] difference in ds from ds0 for current triangle at current sampling
+dX=nan(3,3); % (component(x,y,xy), segment)
+E=nan(3,4,20,ns); % ((Eyy,Exx,Exy), triangle, square, sample) matrix for the E values of the strain map
 
-for s=1:20
+for s=1:20 % Do the following for each square of markers (ordered left->right, bottom->top)
     % Set coord for each point on the square (BL=bottom left, TR=top right, etc)
     if s<9
         BL=[3*s-2,3*s-1,3*s];
@@ -100,93 +102,79 @@ for s=1:20
         TR=[3*(s*3/2+5+temp)+1,3*(s*3/2+5+temp)+2,3*(s*3/2+5+temp)+3];
         TL=[3*(s*3/2+5+temp)-2,3*(s*3/2+5+temp)-1,3*(s*3/2+5+temp)];
     end
-    
-    m1=BL(3)/3; % marker 1 in following calc will be defined by the BL of the current square
-    m2=BR(3)/3; % marker 2 in following calc will be defined by the BR of the current square
-    m3=TL(3)/3; % marker 3 in following calc will be defined by the TL of the current square
-    m4=TR(3)/3; % marker 4 in following calc will be defined by the TR of the current square
 
-    % Generate matrix of 2D coordinates
-    for is=1:ns % for this for each sample
-        AB=BIG(is,BR)-BIG(is,BL); % % Define vector from BL to BR
-        AC=BIG(is,TL)-BIG(is,BL); % % Define vector from BL to TL
-        AD=BIG(is,TR)-BIG(is,BL); % % Define vector from BL to TR
-        BD=BIG(is,TR)-BIG(is,BR); % % Define vector from BR to TR
-        
-        uX=AB/norm(AB);
-        uY=cross(cross(AB,AC),AB);
-        uY=uY/norm(uY);
-
-        if m1==1 % only do this for the very first marker. Each other BL will be defined as the TL of the square beneath it
-            D2(is,:,m1)=[0,0]; % set coord for first marker to (0,0)
-        end
-            D2(is,:,m2)=D2(is,:,m1)+[dot(AB,uX),dot(AB,uY)]; % set coord for BR marker in current square
-        if or(m3==10,mod(m3-19,3)==0) % only do this for left-most markers of each row
-            D2(is,:,m3)=D2(is,:,m1)+[dot(AC,uX),dot(AC,uY)]; % set coord for TL marker in current square
-        end
-        uX=AB/norm(AB);
-        uY=cross(cross(AB,BD),AB);
-        uY=uY/norm(uY);
-        D2(is,:,m4)=D2(is,:,m1)+[dot(AD,uX),dot(AD,uY)]; % set coord for TR marker in current square
-    end
-end
-
-
-% Square: Starts with bottom left and moves left-to-right, bottom-to-top
-%                        __         __
-% Triangle: 1 - |\ , 2 - \ | , 3 - | / , 4 - /|
-%               |_\       \|       |/       /_|
-% Line: Horiz always 1, vert always 2, diag always 3
-ds0=[nan;nan;nan]; % [segment1, segment2, segment3] initial delta-s^2 of each segment of current triangle
-ds=[nan;nan;nan]; % [segment1, segment2, segment3] current delta-s^2 of each segment of current triangle
-dds=[nan;nan;nan]; % [segment1, segment2, segment3] difference in ds from ds0 for current triangle at current sampling
-dX=nan(3,3); % (component(x,y,xy), segment)
-E=nan(3,4,20,ns); % ((Eyy,Exx,Exy), triangle, square, sample) matrix for the E values of the strain map
-M=[0,0,0,0,0,0,0,0]; % [BL,BR,TL,TR,BL,BR,TL,TR]
-for s=1:20
-    % Set coord for each point on the square (BL=bottom left, TR=top right, etc)
-    if s<9
-        M(1)=s;
-        M(2)=s+1;
-        M(3)=s+9;
-        M(4)=s+10;
-    elseif s==9
-        M(1)=12;
-        M(2)=14;
-        M(3)=19;
-        M(4)=20;
-    elseif s==10
-        M(1)=14;
-        M(2)=16;
-        M(3)=20;
-        M(4)=21;
-    elseif s>10
-        temp=2+.5*mod(s,2);
-        M(1)=s*3/2+temp;
-        M(2)=s*3/2+temp+1;
-        M(3)=s*3/2+temp+4;
-        M(4)=s*3/2+temp+3;
-    end
-    M(5)=M(1);M(6)=M(2);M(7)=M(3);M(8)=M(4);
     for it=1:4
+        % Establish the edge vectors for each square of the reference frame
+        AB=BIG(refp,BR)-BIG(refp,BL); % Define vector from BL to BR
+        AC=BIG(refp,TL)-BIG(refp,BL); % Define vector from BL to TL
+        CD=BIG(refp,TR)-BIG(refp,TL); % Define vector from TL to TR
+        BD=BIG(refp,TR)-BIG(refp,BR); % Define vector from BR to TR
+        AD=BIG(refp,TR)-BIG(refp,BL); % Define vector from BL to TR
+        BC=BIG(refp,TL)-BIG(refp,BR); % Define vector from BR to TL
+            % Triangle: 1 - |\ , 2 - \ | , 3 - | / , 4 - /|
+            %               |_\       \|       |/       /_|
+            % Line: Horiz always 1, vert always 2, diag always 3
+        switch it % Choose order of the segments of the triangle
+            case 1
+                L1=AB;
+                L2=AC;
+                L3=BC;
+            case 2
+                L1=CD;
+                L2=BD;
+                L3=BC;
+            case 3
+                L1=CD;
+                L2=AC;
+                L3=AD;
+            case 4
+                L1=AB;
+                L2=BD;
+                L3=AD;
+        end
+        uX=L1/norm(L1); % Establish the unit x-axis
+        uY=cross(cross(L1,L2),L1); % Establish the y-axis
+        uY=uY/norm(uY); % Normalize the y-axis to a unit vector
         % Initial distance components for segments of triangle 1
-        dX(1:2,1)=(D2(refp,:,M(it))-D2(refp,:,M(it+1))); % dx, dy for segment 1
-        dX(1:2,2)=(D2(refp,:,M(it))-D2(refp,:,M(it+2))); % dx, dy for segment 2
-        dX(1:2,3)=(D2(refp,:,M(it+1))-D2(refp,:,M(it+2))); % dx, dy for segment 3
-        dX(3,1)=dX(1,1)*dX(2,1); % dxdy for segment 1
-        dX(3,2)=dX(1,2)*dX(2,2); % dxdy for segment 2
-        dX(3,3)=dX(1,3)*dX(2,3); % dxdy for segment 3
+        dX(:,1)=[dot(L1,uX),dot(L1,uY),dot(L1,uX)*dot(L1,uY)]; % dx, dy, dxdy for segment 1
+        dX(:,2)=[dot(L2,uX),dot(L2,uY),dot(L2,uX)*dot(L2,uY)]; % dx, dy, dxdy for segment 2
+        dX(:,3)=[dot(L3,uX),dot(L3,uY),dot(L3,uX)*dot(L3,uY)]; % dx, dy, dxdy for segment 3
         % matrix of dX^2 stuffs
         dXM=[2*dX(1,1)^2,2*dX(2,1)^2,4*dX(3,1);2*dX(1,2)^2,2*dX(2,2)^2,4*dX(3,2);2*dX(1,3)^2,2*dX(2,3)^2,4*dX(3,3)];
         % Initial squared distance magnitudes for segments
         ds0(1)=dX(1,1)^2+dX(2,1)^2;
         ds0(2)=dX(1,2)^2+dX(2,2)^2;
         ds0(3)=dX(1,3)^2+dX(2,3)^2;
-        % Current squared distance magnitudes for segments
-        for is=1:ns
-            ds(1)=dot((D2(is,:,M(it))-D2(is,:,M(it+1))),(D2(is,:,M(it))-D2(is,:,M(it+1))));
-            ds(2)=dot((D2(is,:,M(it))-D2(is,:,M(it+2))),(D2(is,:,M(it))-D2(is,:,M(it+2))));
-            ds(3)=dot((D2(is,:,M(it+1))-D2(is,:,M(it+2))),(D2(is,:,M(it+1))-D2(is,:,M(it+2))));
+        for is=1:ns % Do this for each sample
+            AB=BIG(is,BR)-BIG(is,BL); % % Define vector from BL to BR
+            AC=BIG(is,TL)-BIG(is,BL); % % Define vector from BL to TL
+            CD=BIG(refp,TR)-BIG(refp,TL); % Define vector from TL to TR
+            BD=BIG(is,TR)-BIG(is,BR); % % Define vector from BR to TR
+            switch it
+                case 1
+                    L1=AB;
+                    L2=AC;
+                    L3=BC;
+                case 2
+                    L1=CD;
+                    L2=BD;
+                    L3=BC;
+                case 3
+                    L1=CD;
+                    L2=AC;
+                    L3=AD;
+                case 4
+                    L1=AB;
+                    L2=BD;
+                    L3=AD;
+            end
+            uX=L1/norm(L1); % Establish the unit x-axis
+            uY=cross(cross(L1,L2),L1); % Establish the y-axis
+            uY=uY/norm(uY); % Normalize the y-axis to a unit vector
+            % Initial distance components for segments of triangle 1
+            ds(1)=dot(L1,uX)^2+dot(L1,uY)^2;
+            ds(2)=dot(L2,uX)^2+dot(L2,uY)^2;
+            ds(3)=dot(L3,uX)^2+dot(L3,uY)^2;
             % Get difference from ds0 to ds:
             dds(1)=ds(1)-ds0(1);
             dds(2)=ds(2)-ds0(2);
@@ -207,6 +195,8 @@ Ey(abs(Ey)>2)=nan; % Clear big outliers for Eyy
 Exy(abs(Exy)>2)=nan; % Clear big outliers for Exy
 
 Holes=max(isnan(Ex),[],'all')+max(isnan(Ey),[],'all')+max(isnan(Exy),[],'all');
+
+%% Output Conditioning %%
 
 %                        __         __
 % Triangle: 1 - |\ , 2 - \ | , 3 - | / , 4 - /|
@@ -292,11 +282,12 @@ CMap(1:50,2)=linspace(0,1,50); CMap(51:100,2)=ones(50,1); CMap(101:200,2)=linspa
 CMap(1:50,3)=linspace(1,0,50); CMap(51:100,3)=zeros(50,1); CMap(101:200,3)=zeros(100,1);
 colormap(CMap);
 
-%% Initialize video
 
-myVideo = VideoWriter([sn tn '_Anim']); % open/create video file
+% % % % Generate Video/Animation % % % %
+
+myVideo = VideoWriter([sn '_' tn '_Anim']); % open/create video file
 myVideo.FrameRate = Fs;  % set frame rate
-open(myVideo) % open the video file for writing
+open(myVideo); % open the video file for writing
 
 set(0, 'DefaulttextInterpreter', 'none');
 
@@ -361,17 +352,33 @@ for is=1:ns
     frame = getframe(gcf); %get frame
     writeVideo(myVideo, frame);
 end
-close(myVideo)
+close(myVideo);
 
 close % close any figures that might still be open
 
-% Find maximum strain moment and identify the corresponding indices
-% (triangle square, sample)
-[~,B]=max(Ey,[],'all','linear');
-[it,s,is] = ind2sub(size(Ey), B);numsq=['Square' ' ' num2str(s)];
 
-TimeMaxStrain=(is-1)/Fs;
-mt=string(TimeMaxStrain);
+% % % % Generate Time-Series Figure % % % %
+
+% Find maximum strain moment and identify the corresponding indices
+% Max Ex
+[~,B]=max(abs(Ex),[],'all','linear');
+[itx,sx,isx] = ind2sub(size(Ex), B); % (triangle square, sample)
+numsqx=['Square' ' ' num2str(sx)];
+% Max Ey
+[~,B]=max(abs(Ey),[],'all','linear');
+[ity,sy,isy] = ind2sub(size(Ey), B); % (triangle square, sample)
+numsqy=['Square' ' ' num2str(sy)];
+% Max Exy
+[~,B]=max(abs(Exy),[],'all','linear');
+[itxy,sxy,isxy] = ind2sub(size(Exy), B); % (triangle square, sample)
+numsqxy=['Square' ' ' num2str(sxy)];
+
+TMSx=(isx-1)/Fs;
+mtx=string(TMSx);
+TMSy=(isy-1)/Fs;
+mty=string(TMSy);
+TMSxy=(isxy-1)/Fs;
+mtxy=string(TMSxy);
 
 ExMAX=zeros(1,82); EyMAX=zeros(1,82); ExyMAX=zeros(1,82); % initialize the color coding variables for the patch plot
 ExMAX(81)=-max(abs(Ex),[],'all'); ExMAX(82)=-ExMAX(81);
@@ -381,37 +388,27 @@ ExyMAX(81)=-max(abs(Exy),[],'all'); ExyMAX(82)=-ExyMAX(81);
 % Now recalculate C values for the max-strain time step
 for s=1:20 % for each square, make the smaller triangles the average of the larger overlapping ones
     % first do the color coding for Exx
-    ExMAX(s)=(Ex(1,s,is)+Ex(4,s,is))/2;
-    ExMAX(s+20)=(Ex(2,s,is)+Ex(4,s,is))/2;
-    ExMAX(s+40)=(Ex(2,s,is)+Ex(3,s,is))/2;
-    ExMAX(s+60)=(Ex(1,s,is)+Ex(3,s,is))/2;
+    ExMAX(s)=(Ex(1,s,isx)+Ex(4,s,isx))/2;
+    ExMAX(s+20)=(Ex(2,s,isx)+Ex(4,s,isx))/2;
+    ExMAX(s+40)=(Ex(2,s,isx)+Ex(3,s,isx))/2;
+    ExMAX(s+60)=(Ex(1,s,isx)+Ex(3,s,isx))/2;
     % next color code for Eyy
-    EyMAX(s)=(Ey(1,s,is)+Ey(4,s,is))/2;
-    EyMAX(s+20)=(Ey(2,s,is)+Ey(4,s,is))/2;
-    EyMAX(s+40)=(Ey(2,s,is)+Ey(3,s,is))/2;
-    EyMAX(s+60)=(Ey(1,s,is)+Ey(3,s,is))/2;
+    EyMAX(s)=(Ey(1,s,isy)+Ey(4,s,isy))/2;
+    EyMAX(s+20)=(Ey(2,s,isy)+Ey(4,s,isy))/2;
+    EyMAX(s+40)=(Ey(2,s,isy)+Ey(3,s,isy))/2;
+    EyMAX(s+60)=(Ey(1,s,isy)+Ey(3,s,isy))/2;
     % next color code for Exy
-    ExyMAX(s)=(Exy(1,s,is)+Exy(4,s,is))/2;
-    ExyMAX(s+20)=(Exy(2,s,is)+Exy(4,s,is))/2;
-    ExyMAX(s+40)=(Exy(2,s,is)+Exy(3,s,is))/2;
-    ExyMAX(s+60)=(Exy(1,s,is)+Exy(3,s,is))/2;
+    ExyMAX(s)=(abs(Exy(1,s,isxy))+abs(Exy(4,s,isxy)))/2;
+    ExyMAX(s+20)=(abs(Exy(2,s,isxy))+abs(Exy(4,s,isxy)))/2;
+    ExyMAX(s+40)=(abs(Exy(2,s,isxy))+abs(Exy(3,s,isxy)))/2;
+    ExyMAX(s+60)=(abs(Exy(1,s,isxy))+abs(Exy(3,s,isxy)))/2;
 end
 
-switch it
-    case 1
-        numtr="Bottom Triangle";
-    case 2
-        numtr="Right Triangle";
-    case 3
-        numtr="Top Triangle";
-    case 4
-        numtr="Left Triangle";
-end
 % Generate vectors of the strain in the max strain triangle over the full
 % sample period
-StrX=nan(ns,1); StrX(:)=Ex(it,s,:);
-StrY=nan(ns,1); StrY(:)=Ey(it,s,:);
-StrXY=nan(ns,1); StrXY(:)=Exy(it,s,:);
+StrX=nan(ns,1); StrX(:)=Ex(itx,sx,:);
+StrY=nan(ns,1); StrY(:)=Ey(ity,sy,:);
+StrXY=nan(ns,1); StrXY(:)=Exy(itxy,sxy,:);
 
 colormap(CMap);
 
@@ -419,12 +416,12 @@ tiledlayout(2,2);
 nexttile
 patch(xpatch,ypatch,EyMAX);
 colorbar
-ptitle=strcat("Eyy for ",tn," at ",mt,"s");
+ptitle=strcat("Eyy for ",tn," at ",mty,"s");
 title(ptitle,'FontSize',8);
 xlabel('X','FontSize',8); ylabel('Y','FontSize',8);
 nexttile
 plot(time,StrX);
-ptitle=strcat("Strain v Time for ",numtr," of ",numsq);
+ptitle=({'Strain v Time for max strain locations for each component',strcat("(Ex->",numsqx,", Ey->",numsqy,", Exy->",numsqxy,")")});
 title(ptitle,'FontSize',8);
 xlabel('Time (s)','FontSize',8)
 ylabel('Strain','FontSize',8)
@@ -435,13 +432,13 @@ legend('Normal X', 'Normal Y', 'Shear','FontSize',5);
 nexttile
 patch(xpatch,ypatch,ExyMAX);
 colorbar
-ptitle=strcat("Exy for ",tn," at ",mt,"s");
+ptitle=strcat("Exy for ",tn," at ",mtxy,"s");
 title(ptitle,'FontSize',8);
 xlabel('X','FontSize',8); ylabel('Y','FontSize',8);
 nexttile
 patch(xpatch,ypatch,ExMAX);
 colorbar
-ptitle=strcat("Exx for ",tn," at ",mt,"s");
+ptitle=strcat("Exx for ",tn," at ",mtx,"s");
 title(ptitle,'FontSize',8);
 xlabel('X','FontSize',8); ylabel('Y','FontSize',8);
 
@@ -450,8 +447,8 @@ set(gcf,'PaperPosition',[0 0 8.5 6.5]);
 set(gca,'FontSize',8);
 set(gca,'FontName','Calibri');
 
-print('-r300',strcat(sn,tn,'_EvT'),'-dpng');
+print('-r300',strcat(sn,'_',tn,'_EvT'),'-dpng');
 
-DataFile=strcat(sn,tn,'_Data.mat');
-save(DataFile,'Fs','ns','P','E','Ex','Ey','Exy','ExMAX','EyMAX','ExyMAX','TimeMaxStrain','StrX','StrY','StrXY','Holes');
+DataFile=strcat(sn,'_',tn,'_Data.mat');
+save(DataFile,'Fs','ns','P','E','Ex','Ey','Exy','ExMAX','EyMAX','ExyMAX','TMSx','TMSy','TMSxy','StrX','StrY','StrXY','Holes');
 end
