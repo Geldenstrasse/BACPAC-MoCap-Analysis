@@ -194,7 +194,7 @@ Ex(abs(Ex)>2)=nan; % Clear big outliers for Exx
 Ey(abs(Ey)>2)=nan; % Clear big outliers for Eyy
 Exy(abs(Exy)>2)=nan; % Clear big outliers for Exy
 
-Holes=max(isnan(Ex),[],'all')+max(isnan(Ey),[],'all')+max(isnan(Exy),[],'all');
+Holes=logical(max(isnan(Ex),[],'all')+max(isnan(Ey),[],'all')+max(isnan(Exy),[],'all'));
 
 %% Output Conditioning %%
 
